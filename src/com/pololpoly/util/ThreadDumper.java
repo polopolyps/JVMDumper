@@ -172,7 +172,7 @@ public class ThreadDumper {
 
 			for (MonitorInfo monitorInfo : threadInfo.getLockedMonitors()) {
 				if (monitorInfo.getLockedStackDepth() == i) {
-					dump.append(INDENT).append("  - locked ").append(monitorInfo);
+					dump.append(INDENT).append("  - locked <0x").append(getObjectId(monitorInfo)).append(">");
 					dump.append(NEW_LINE);
 				}
 			}
@@ -242,7 +242,7 @@ public class ThreadDumper {
 		dump.append(NEW_LINE);
 
 		for (LockInfo info : locks) {
-			dump.append(INDENT).append("  - ").append(info);
+			dump.append(INDENT).append("  - ").append("<0x").append(getObjectId(info)).append(">");
 			dump.append(NEW_LINE);
 		}
 		dump.append(NEW_LINE);
@@ -331,4 +331,7 @@ public class ThreadDumper {
 		}
 	}
 
+	private String getObjectId(Object object) {
+		return object.toString().split("@")[1];
+	}
 }
