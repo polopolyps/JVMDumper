@@ -7,9 +7,12 @@ import java.lang.management.MonitorInfo;
 import java.lang.management.RuntimeMXBean;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
+import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import javax.management.InstanceNotFoundException;
 import javax.management.IntrospectionException;
@@ -21,75 +24,79 @@ import javax.management.ReflectionException;
 
 public class ThreadDumper {
 
-	private static final String FIND_MONITOR_DEADLOCKED_THREADS = "findMonitorDeadlockedThreads";
+	private static final String NEW_LINE = "\n";
+
+	private static final Logger LOGGER = Logger.getLogger(ThreadDumper.class.getName());
+
 	private static final String FIND_DEADLOCKED_THREADS = "findDeadlockedThreads";
 	private static final String DATE_FORMAT = "yyyy-MM-dd HH:mm:ss";
 	private static final String INDENT = "    ";
 	private static final int CONNECT_RETRIES = 10;
 
-	private MBeanServerConnection server;
-	private ThreadMXBean threadMbean;
-	private ObjectName objname;
-
-	private String dumpPrefix = "\nFull thread dump ";
-
-	private String findDeadlocksMethodName = FIND_DEADLOCKED_THREADS;
-	private boolean canDumpLocks = true;
-	private String javaVersion;
+	private final String dumpPrefix;
+	private final boolean canDumpLocks;
 
 	/**
 	 * Constructs a ThreadMonitor object to get thread information in a remote
 	 * JVM.
-	 * @throws DumpException 
+	 * 
+	 * @throws DumpException
 	 */
-	public ThreadDumper(MBeanServerConnection server) throws IOException, DumpException {
-		setMBeanServerConnection(server);
-		try {
-			objname = new ObjectName(ManagementFactory.THREAD_MXBEAN_NAME);
-		} catch (MalformedObjectNameException e) {
-			throw new IOException(e);
-		}
-		parseMBeanInfo();
+	public ThreadDumper(MBeanServerConnection connection) throws IOException {
+		RuntimeMXBean runtimeMxBean = ManagementFactory.newPlatformMXBeanProxy(connection,
+				ManagementFactory.RUNTIME_MXBEAN_NAME, RuntimeMXBean.class);
+
+		String javaVersion = runtimeMxBean.getVmVersion();
+		dumpPrefix = "\nFull thread dump " + runtimeMxBean.getVmName() + " " + javaVersion + NEW_LINE;
+
+		/*
+		 * hack for jconsole dumping itself, for strange reasons, vm doesn't
+		 * provide findDeadlockedThreads, but 1.5 ops fail with an error.
+		 */
+		canDumpLocks = javaVersion.startsWith("1.6");
 	}
 
-	private void setDumpPrefix() {
-		try {
-			RuntimeMXBean rmbean = (RuntimeMXBean) ManagementFactory.newPlatformMXBeanProxy(server,
-					ManagementFactory.RUNTIME_MXBEAN_NAME, RuntimeMXBean.class);
-
-			dumpPrefix = "\nFull thread dump " + rmbean.getVmName() + " " + rmbean.getVmVersion() + "\n";
-			javaVersion = rmbean.getVmVersion();
-
-		} catch (IOException ex) {
-			ex.printStackTrace();
-		}
+	private String getDumpPrefix() {
+		return dumpPrefix;
 	}
 
-	public String threadDump() throws DumpException {
+	private boolean canDumpLocks() {
+		return canDumpLocks;
+	}
+
+	public String getThreadDump(ThreadMXBean threadMxBean) throws DumpException {
 		StringBuilder dump = new StringBuilder();
 		int retries = 0;
 
 		while (retries < CONNECT_RETRIES) {
 			try {
-				if (canDumpLocks) {
-					if (threadMbean.isObjectMonitorUsageSupported() && threadMbean.isSynchronizerUsageSupported()) {
+				if (canDumpLocks()) {
+					if (threadMxBean.isObjectMonitorUsageSupported() && threadMxBean.isSynchronizerUsageSupported()) {
 						/*
 						 * Print lock info if both object monitor usage and
 						 * synchronizer usage are supported. This sample code
 						 * can be modified to handle if either monitor usage or
 						 * synchronizer usage is supported.
 						 */
-						dump.append(dumpThreadInfoWithLocks());
+						ThreadInfo[] threadsInfo = threadMxBean.dumpAllThreads(true, true);
+						dump.append(getThreadsWithLockInfoDump(threadsInfo));
 					}
 				} else {
-					dump.append(dumpThreadInfo());
+					ThreadInfo[] threadsInfo = threadMxBean.getThreadInfo(threadMxBean.getAllThreadIds(),
+							Integer.MAX_VALUE);
+					dump.append(getThreadsInfoDump(threadsInfo));
 				}
-				retries = CONNECT_RETRIES;
-			} catch (NullPointerException npe) {
+
+				break;
+
+			} catch (NullPointerException e) {
+				// where can this come from???
+				LOGGER.log(Level.WARNING, "Could not get a thread dump: " + e.getMessage(), e);
+
 				if (retries >= CONNECT_RETRIES) {
 					throw new DumpException(
 							"Error requesting dump using the JMX Connection. Remote VM returned nothing.\n"
-									+ "You can try to reconnect or just simply try to request a dump again.");
+									+ "You can try to reconnect or simply try to request a dump again.");
 				}
 				try {
 					// workaround for unstable connections.
@@ -102,7 +109,7 @@ public class ThreadDumper {
 		}
 		dump.append("\n<EndOfDump>\n\n");
 
-		return (dump.toString());
+		return dump.toString();
 	}
 
 	/**
@@ -111,72 +118,66 @@ public class ThreadDumper {
 	 * @return dump date (e.g. 2007-10-25 08:00:00)
 	 */
 	private String getCurrentDateAsString() {
-		SimpleDateFormat sdfDate = new SimpleDateFormat(DATE_FORMAT, Locale.ENGLISH);
-		return sdfDate.format(new Date());
+		DateFormat dateFormat = new SimpleDateFormat(DATE_FORMAT, Locale.ENGLISH);
+		return dateFormat.format(new Date());
 	}
 
-	private String dumpThreadInfo() {
+	private String getDumpHeader() {
 		StringBuilder dump = new StringBuilder();
 
 		dump.append(getCurrentDateAsString());
-		dump.append(dumpPrefix);
-		dump.append("\n");
+		dump.append(getDumpPrefix());
+		dump.append(NEW_LINE);
 
-		long[] tids = threadMbean.getAllThreadIds();
-		ThreadInfo[] threadInfos = threadMbean.getThreadInfo(tids, Integer.MAX_VALUE);
+		return dump.toString();
+	}
 
-		for (ThreadInfo threadInfo : threadInfos) {
-			dump.append(getThreadInfoDump(threadInfo));
+	private String getThreadsInfoDump(ThreadInfo threadInfos[]) {
+		StringBuilder dump = new StringBuilder();
+
+		dump.append(getDumpHeader());
+
+		for (ThreadInfo info : threadInfos) {
+			dump.append(getSingleThreadInfoDump(info));
 		}
 
 		return dump.toString();
 	}
 
-	private String dumpThreadInfoWithLocks() {
+	private String getThreadsWithLockInfoDump(ThreadInfo threadInfos[]) {
 		StringBuilder dump = new StringBuilder();
+		dump.append(getDumpHeader());
 
-		dump.append(getCurrentDateAsString());
-		dump.append(dumpPrefix);
-		dump.append("\n");
-
-		ThreadInfo[] threadInfos = threadMbean.dumpAllThreads(true, true);
-
-		for (ThreadInfo threadInfo : threadInfos) {
-			dump.append(getThreadInfoDump(threadInfo));
-
-			LockInfo[] syncs = threadInfo.getLockedSynchronizers();
-			dump.append(getLockInfoDump(syncs));
-
-			MonitorInfo[] monitors = threadInfo.getLockedMonitors();
-			dump.append(getMonitorInfoDump(threadInfo, monitors));
+		for (ThreadInfo info : threadInfos) {
+			dump.append(getSingleThreadInfoDump(info));
+			dump.append(getLockInfoDump(info.getLockedSynchronizers()));
+			dump.append(getMonitorInfoDump(info, info.getLockedMonitors()));
 		}
-		dump.append("\n");
+		dump.append(NEW_LINE);
 
 		return dump.toString();
 	}
 
-	private String getThreadInfoDump(ThreadInfo threadInfo) {
+	private String getSingleThreadInfoDump(ThreadInfo threadInfo) {
 		StringBuilder dump = new StringBuilder();
-
 		dump.append(getCoreThreadInfoDump(threadInfo));
 
 		// print stack trace with locks
 		StackTraceElement[] stacktrace = threadInfo.getStackTrace();
-		MonitorInfo[] monitors = threadInfo.getLockedMonitors();
-
+		
 		for (int i = 0; i < stacktrace.length; i++) {
 			StackTraceElement ste = stacktrace[i];
-			dump.append(INDENT + "at " + ste.toString());
-			dump.append("\n");
+			dump.append(INDENT).append("at ").append(ste.toString());
+			dump.append(NEW_LINE);
 
-			for (MonitorInfo mi : monitors) {
-				if (mi.getLockedStackDepth() == i) {
-					dump.append(INDENT + "  - locked " + mi);
-					dump.append("\n");
+			for (MonitorInfo monitorInfo : threadInfo.getLockedMonitors()) {
+				if (monitorInfo.getLockedStackDepth() == i) {
+					dump.append(INDENT).append("  - locked ").append(monitorInfo);
+					dump.append(NEW_LINE);
 				}
 			}
 		}
-		dump.append("\n");
+		dump.append(NEW_LINE);
 
 		return dump.toString();
 	}
@@ -184,36 +185,36 @@ public class ThreadDumper {
 	private String getCoreThreadInfoDump(ThreadInfo threadInfo) {
 		StringBuilder sb = new StringBuilder();
 
-		sb.append("\"").append(threadInfo.getThreadName()).append("\"").append(" nid=").append(threadInfo.getThreadId())
-				.append(" state=").append(threadInfo.getThreadState());
+		sb.append("\"").append(threadInfo.getThreadName()).append("\"").append(" nid=")
+				.append(threadInfo.getThreadId()).append(" state=").append(threadInfo.getThreadState());
 
 		if (threadInfo.getLockName() != null && threadInfo.getThreadState() != Thread.State.BLOCKED) {
 			String[] lockInfo = threadInfo.getLockName().split("@");
-			
-			sb.append("\n").append(INDENT).append("- waiting on <0x").append(lockInfo[1]).append("> (a ")
+
+			sb.append(NEW_LINE).append(INDENT).append("- waiting on <0x").append(lockInfo[1]).append("> (a ")
 					.append(lockInfo[0]).append(")");
-			sb.append("\n").append(INDENT).append("- locked <0x").append(lockInfo[1]).append("> (a ")
+			sb.append(NEW_LINE).append(INDENT).append("- locked <0x").append(lockInfo[1]).append("> (a ")
 					.append(lockInfo[0]).append(")");
-			
+
 		} else if (threadInfo.getLockName() != null && threadInfo.getThreadState() == Thread.State.BLOCKED) {
 			String[] lockInfo = threadInfo.getLockName().split("@");
-			sb.append("\n").append(INDENT).append("- waiting to lock <0x").append(lockInfo[1]).append("> (a ")
+			sb.append(NEW_LINE).append(INDENT).append("- waiting to lock <0x").append(lockInfo[1]).append("> (a ")
 					.append(lockInfo[0]).append(")");
 		}
 
 		if (threadInfo.isSuspended()) {
 			sb.append(" (suspended)");
 		}
-		
+
 		if (threadInfo.isInNative()) {
 			sb.append(" (running in native)");
 		}
 
-		sb.append("\n");
+		sb.append(NEW_LINE);
 		if (threadInfo.getLockOwnerName() != null) {
 			sb.append(INDENT).append(" owned by ").append(threadInfo.getLockOwnerName()).append(" id=")
 					.append(threadInfo.getLockOwnerId());
-			sb.append("\n");
+			sb.append(NEW_LINE);
 		}
 
 		return sb.toString();
@@ -228,7 +229,7 @@ public class ThreadDumper {
 			dump.append(INDENT).append("  - ").append(info).append(" locked at \n");
 			dump.append(INDENT).append("      ").append(info.getLockedStackDepth()).append(" ")
 					.append(info.getLockedStackFrame());
-			dump.append("\n");
+			dump.append(NEW_LINE);
 		}
 
 		return dump.toString();
@@ -238,13 +239,13 @@ public class ThreadDumper {
 		StringBuilder dump = new StringBuilder();
 
 		dump.append(INDENT).append("Locked synchronizers: count = ").append(locks.length);
-		dump.append("\n");
+		dump.append(NEW_LINE);
 
 		for (LockInfo info : locks) {
 			dump.append(INDENT).append("  - ").append(info);
-			dump.append("\n");
+			dump.append(NEW_LINE);
 		}
-		dump.append("\n");
+		dump.append(NEW_LINE);
 
 		return dump.toString();
 	}
@@ -252,92 +253,82 @@ public class ThreadDumper {
 	/**
 	 * Checks if any threads are deadlocked. If any, get the thread dump
 	 * information.
+	 * 
+	 * @throws DumpException
+	 * @throws IOException
 	 */
-	public String getDeadlockData() {
+	public String getDeadlockData(MBeanServerConnection connection, ThreadMXBean threadMxBean) throws IOException, DumpException {
 		StringBuilder dump = new StringBuilder();
 
-		if (FIND_DEADLOCKED_THREADS.equals(findDeadlocksMethodName) && threadMbean.isSynchronizerUsageSupported()) {
-			long[] deadlickedThreads = threadMbean.findDeadlockedThreads();
-			if (deadlickedThreads == null) {
+		if (isFindDeadlocksMethodSupported(connection) && threadMxBean.isSynchronizerUsageSupported()) {
+			long[] deadlockedThreads = threadMxBean.findDeadlockedThreads();
+			if (deadlockedThreads == null) {
 				return "";
 			}
 
 			dump.append("\n\nFound one Java-level deadlock:\n");
 			dump.append("==============================\n");
 
-			ThreadInfo[] infos = threadMbean.getThreadInfo(deadlickedThreads, true, true);
-			for (ThreadInfo info : infos) {
-				dump.append(getThreadInfoDump(info));
-				dump.append(getLockInfoDump(info.getLockedSynchronizers()));
-				dump.append("\n");
-			}
+			ThreadInfo[] infos = threadMxBean.getThreadInfo(deadlockedThreads, true, true);
+			dump.append(getDeadlockedThreadsInfoDump(infos));
 
 		} else {
-			long[] monitorDeadlockThreads = threadMbean.findMonitorDeadlockedThreads();
+			long[] monitorDeadlockThreads = threadMxBean.findMonitorDeadlockedThreads();
 			if (monitorDeadlockThreads == null) {
 				return "";
 			}
-			
+
 			dump.append("\n\nFound one Java-level deadlock:\n");
 			dump.append("==============================\n");
 
-			ThreadInfo[] infos = threadMbean.getThreadInfo(monitorDeadlockThreads, Integer.MAX_VALUE);
-			for (ThreadInfo info : infos) {
-				dump.append(getThreadInfoDump(info));
-			}
+			ThreadInfo[] infos = threadMxBean.getThreadInfo(monitorDeadlockThreads, Integer.MAX_VALUE);
+			dump.append(getDeadlockedThreadsInfoDump(infos));
 
 		}
 
-		return (dump.toString());
+		return dump.toString();
+	}
+	
+	private String getDeadlockedThreadsInfoDump(ThreadInfo[] infos) {
+		StringBuilder dump = new StringBuilder();
+		
+		for (ThreadInfo info : infos) {
+			dump.append(getSingleThreadInfoDump(info));
+			dump.append(getLockInfoDump(info.getLockedSynchronizers()));
+			dump.append(NEW_LINE);
+		}
+		
+		return dump.toString();
 	}
 
-	private void parseMBeanInfo() throws IOException, DumpException {
+	private boolean isFindDeadlocksMethodSupported(MBeanServerConnection connection) throws IOException, DumpException {
 		try {
-			MBeanOperationInfo[] operations = server.getMBeanInfo(objname).getOperations();
-			setDumpPrefix();
+			ObjectName objectName = new ObjectName(ManagementFactory.THREAD_MXBEAN_NAME);
+			MBeanOperationInfo[] operations = connection.getMBeanInfo(objectName).getOperations();
 
 			// look for findDeadlockedThreads operations;
-			boolean found = false;
 			for (MBeanOperationInfo op : operations) {
-				if (op.getName().equals(findDeadlocksMethodName)) {
-					found = true;
-					break;
+				if (FIND_DEADLOCKED_THREADS.equals(op.getName())) {
+					return true;
 				}
 			}
-			if (!found) {
-				/*
-				 * if findDeadlockedThreads operation doesn't exist, the target
-				 * VM is running on JDK 5 and details about synchronizers and
-				 * locks cannot be dumped.
-				 */
-				findDeadlocksMethodName = FIND_MONITOR_DEADLOCKED_THREADS;
 
-				/*
-				 * hack for jconsole dumping itself, for strange reasons, vm
-				 * doesn't provide findDeadlockedThreads, but 1.5 ops fail with
-				 * an error.
-				 */
-				// System.out.println("java.version=" +javaVersion);
-				canDumpLocks = javaVersion.startsWith("1.6");
-			}
+			/*
+			 * if findDeadlockedThreads operation doesn't exist, the target VM
+			 * is running on JDK 5 and details about synchronizers and locks
+			 * cannot be dumped.
+			 */
+			return false;
+
 		} catch (IntrospectionException e) {
 			throw new DumpException(e);
 		} catch (InstanceNotFoundException e) {
 			throw new DumpException(e);
 		} catch (ReflectionException e) {
 			throw new DumpException(e);
+		} catch (MalformedObjectNameException e) {
+			throw new DumpException(e);
 		}
 	}
 
-	/**
-	 * reset mbean server connection
-	 * 
-	 * @param mbs
-	 * @throws IOException 
-	 */
-	void setMBeanServerConnection(MBeanServerConnection mbs) throws IOException {
-		server = mbs;
-		threadMbean = (ThreadMXBean) ManagementFactory.newPlatformMXBeanProxy(server,
-				ManagementFactory.THREAD_MXBEAN_NAME, ThreadMXBean.class);
-	}
 }

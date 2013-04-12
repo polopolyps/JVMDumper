@@ -24,7 +24,7 @@ public class ReportCreator {
 	private static final String COMPOSITE_DATA_TYPE = "javax.management.openmbean.CompositeData";
 	private static Logger LOGGER = Logger.getLogger(ReportCreator.class.getName());
 
-	public void createHtmlReport(String outputFilePath, MBeanServerConnection server) {
+	public void createHtmlReport(String outputFilePath, MBeanServerConnection serverConnection) {
 
 		System.out.println("Creating JMX Mbean dump to file " + outputFilePath);
 		if (outputFilePath == null || outputFilePath.length() == 0) {
@@ -41,13 +41,13 @@ public class ReportCreator {
 			printStream.println("<body><table>");
 
 			try {
-				for (ObjectName mbeanName : server.queryNames(null, null)) {
+				for (ObjectName mbeanName : serverConnection.queryNames(null, null)) {
 
 					printStream.println("<tr><td colspan='4'>&nbsp;</td></tr>");
 					printStream.println("<tr><td>MBean:</td><td colspan='3'>" + mbeanName + "</td></tr>");
 
-					MBeanAttributeInfo[] attributes = getMBeanInfo(server, mbeanName).getAttributes();
-					printAttributes(server, printStream, mbeanName, attributes);
+					MBeanAttributeInfo[] attributes = getMBeanInfo(serverConnection, mbeanName).getAttributes();
+					printAttributes(printStream, serverConnection, mbeanName, attributes);
 				}
 			} catch (IOException e) {
 				printStream.print("<tr><td colspan=3>" + e.getMessage() + "</td></tr>");
@@ -63,7 +63,7 @@ public class ReportCreator {
 		}
 	}
 
-	private void printAttributes(MBeanServerConnection server, PrintStream printStream, final ObjectName mbeanName,
+	private void printAttributes(PrintStream printStream, MBeanServerConnection server, ObjectName mbeanName,
 			MBeanAttributeInfo[] attributes) throws IOException {
 
 		for (MBeanAttributeInfo attributeInfo : attributes) {
@@ -120,10 +120,10 @@ public class ReportCreator {
 		}
 	}
 
-	private MBeanInfo getMBeanInfo(MBeanServerConnection server, ObjectName mbeanName) throws MBeanException {
+	private MBeanInfo getMBeanInfo(MBeanServerConnection server, ObjectName mBeanName) throws MBeanException {
 
 		try {
-			return server.getMBeanInfo(mbeanName);
+			return server.getMBeanInfo(mBeanName);
 
 		} catch (InstanceNotFoundException e) {
 			throw new MBeanException(e);

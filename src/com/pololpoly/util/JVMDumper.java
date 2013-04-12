@@ -5,6 +5,8 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -24,51 +26,48 @@ public class JVMDumper {
 	private static final String DATE_FORMAT = "yyyy-MM-dd-HH-mm-ss";
 	private static final Logger LOGGER = Logger.getLogger(JVMDumper.class.getName());
 
-	private MBeanServerConnection server;
-
 	private boolean isEmpty(String string) {
 		return string == null || string.length() == 0;
 	}
 
-	public void init(String hostname, int port, String userName, String password) throws IOException {
+	public MBeanServerConnection getConnection(HostData hostData) throws IOException {
 
 		Map<String, String[]> properties = new Hashtable<String, String[]>();
 
-		if (!isEmpty(userName) && !isEmpty(password)) {
-			System.out.println("User name is " + userName);
-			System.out.println("Password is " + password);
-			properties.put("jmx.remote.credentials", new String[] { userName, password });
+		if (!isEmpty(hostData.getUserName()) && !isEmpty(hostData.getPassword())) {
+			System.out.println("User name is " + hostData.getUserName());
+			System.out.println("Password is " + hostData.getPassword());
+			properties.put("jmx.remote.credentials", new String[] { hostData.getUserName(), hostData.getPassword() });
 		} else {
 			System.out.println("No credentials provided.");
 		}
 
-		connect(hostname, port, properties);
-	}
+		String connectionString = "/jndi/rmi://" + hostData.getHostName() + ":" + hostData.getPort() + "/jmxrmi";
+		System.out.println("Connecting to " + connectionString);
 
-	private void connect(String hostname, int port, Map<String, String[]> properties) throws IOException {
-		String hostKey = "/jndi/rmi://" + hostname + ":" + port + "/jmxrmi";
-		System.out.println("Connecting to " + hostKey);
-
-		JMXServiceURL url = new JMXServiceURL("rmi", "", 0, hostKey);
+		JMXServiceURL url = new JMXServiceURL("rmi", "", 0, connectionString);
 		JMXConnector jmxc = JMXConnectorFactory.connect(url, properties);
-		server = jmxc.getMBeanServerConnection();
+
+		return jmxc.getMBeanServerConnection();
 	}
 
-	public void dumpToFile(String filePath) throws IOException, DumpException {
+	private ThreadMXBean getThreadMxBean(MBeanServerConnection connection) throws IOException {
+		return ManagementFactory.newPlatformMXBeanProxy(connection, ManagementFactory.THREAD_MXBEAN_NAME,
+				ThreadMXBean.class);
+	}
+
+	public void dumpToFile(String filePath, MBeanServerConnection connection) throws IOException, DumpException {
 		System.out.println("Creating thread dump to file " + filePath);
 
 		if (filePath != null) {
 
 			PrintStream p = new PrintStream(new File(filePath));
 			try {
-				ThreadDumper monitor = new ThreadDumper(server);
+				ThreadMXBean threadMxBean = getThreadMxBean(connection);
+				ThreadDumper dumper = new ThreadDumper(connection);
 
-				p.println(monitor.threadDump());
-
-				String deadlocks = monitor.getDeadlockData();
-				if (deadlocks != null) {
-					p.println(deadlocks);
-				}
+				p.println(dumper.getThreadDump(threadMxBean));
+				p.println(dumper.getDeadlockData(connection, threadMxBean));
 
 			} finally {
 				p.close();
@@ -95,10 +94,6 @@ public class JVMDumper {
 		return hosts;
 	}
 
-	private MBeanServerConnection getServer() {
-		return server;
-	}
-
 	private String getCurrentDateAsString() {
 		DateFormat dateFormat = new SimpleDateFormat(DATE_FORMAT);
 		return dateFormat.format(new Date());
@@ -107,17 +102,16 @@ public class JVMDumper {
 	private void processHosts(Map<String, String> hosts, String outputPath) {
 		for (String hostKey : hosts.keySet()) {
 
-			String data[] = hosts.get(hostKey).split(":");
-			HostData hostData = new HostData(data);
+			String hostDetails[] = hosts.get(hostKey).split(":");
+			HostData hostData = new HostData(hostDetails);
 
 			String outputPrefix = outputPath + hostKey + "-" + hostData.getHostName() + "-" + getCurrentDateAsString();
 
 			try {
+				MBeanServerConnection connection = getConnection(hostData);
 
-				init(hostData.getHostName(), hostData.getPort(), hostData.getUserName(), hostData.getPassword());
-				dumpToFile(outputPrefix + ".tdump");
-
-				new ReportCreator().createHtmlReport(outputPrefix + "-mbean.html", getServer());
+				dumpToFile(outputPrefix + ".tdump", connection);
+				new ReportCreator().createHtmlReport(outputPrefix + "-mbean.html", connection);
 
 			} catch (IOException e) {
 				LOGGER.log(Level.WARNING, "IO error occured : " + e.getMessage());
