@@ -6,10 +6,10 @@ The format of the file {server-list-file} (e.g. servers.txt )  is a CSV with the
 
 {FileNamePrefix},{connection}
 
-where connection should include host name, port and any authorisation details. e.g. localhost:8181, or localhost:8181:uid:pwd
+where {connection} should include host name, port and any authorisation details. e.g. localhost:8181, or localhost:8181:uid:pwd
 
 It will generate two files per JVM in the output path folder with the format:
 
-<filenamePrefix><host><date>.tdump
+{filenamePrefix}{host}{date}.tdump
 
-<filenamePrefix><host><date>-mbean.html
+{filenamePrefix}{host}{date}-mbean.html
